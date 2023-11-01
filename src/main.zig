@@ -27,18 +27,14 @@ pub fn main() !u8 {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
-    // cause a memory leak on purpose to observe the leak detector
-    //_ = try allocator.create(u8);
-
-    var filepath = try allocator.dupe(u8, ".env");
+    var filepath: []const u8 = ".env";
     _ = args.next();
     while (args.next()) |arg| {
         std.log.info("{s}", .{arg});
 
         if (std.mem.eql(u8, "-f", arg)) {
             if (args.next()) |f| {
-                allocator.free(filepath);
-                filepath = try allocator.dupe(u8, f);
+                filepath = f;
             } else {
                 std.log.err("error: option '-f' requires an argument <envfile>", .{});
                 return 1;
@@ -50,6 +46,5 @@ pub fn main() !u8 {
         return 1;
     }
 
-    allocator.free(filepath);
     return 0;
 }
