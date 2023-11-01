@@ -27,24 +27,70 @@ pub fn main() !u8 {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
-    var filepath: []const u8 = ".env";
+    var filepath: ?[]const u8 = null;
+    var force_stdin = false;
+    var write = false;
+
     _ = args.next();
     while (args.next()) |arg| {
         std.log.info("{s}", .{arg});
 
         if (std.mem.eql(u8, "-f", arg)) {
-            if (args.next()) |f| {
-                filepath = f;
+            if (args.next()) |_filepath| {
+                if (std.mem.eql(u8, "-", _filepath)) {
+                    force_stdin = true;
+                }
+                filepath = _filepath;
             } else {
-                std.log.err("error: option '-f' requires an argument <envfile>", .{});
+                std.log.err("option '-f' requires an argument <envfile>", .{});
                 return 1;
             }
             continue;
         }
 
-        std.log.err("error: '{s}' is not a recognized flag, option, or argument", .{arg});
+        if (std.mem.eql(u8, "-w", arg)) {
+            write = true;
+            continue;
+        }
+
+        std.log.err("'{s}' is not a recognized flag, option, or argument", .{arg});
         return 1;
     }
 
+    const is_stdin = force_stdin;
+    var file = if (is_stdin)
+        std.io.getStdIn()
+    else
+        openFile(filepath, write) catch return 1;
+    defer if (!is_stdin) file.close();
+
+    const reader = file.reader();
+    var b = try reader.readByte();
+    std.log.info("{c}", .{b});
+
     return 0;
+}
+
+inline fn openFile(maybe_filepath: ?[]const u8, write: bool) error{Failed}!std.fs.File {
+    var filepath = maybe_filepath orelse ".env";
+
+    return std.fs.cwd().openFile(
+        filepath,
+        .{
+            .mode = if (write) .read_write else .read_only,
+        },
+    ) catch |err| {
+        switch (err) {
+            error.FileNotFound => {
+                std.log.err("'{s}' does not exist (ENOENT)", .{filepath});
+            },
+            error.AccessDenied => {
+                std.log.err("could not access '{s}' (EPERM)", .{filepath});
+            },
+            else => {
+                std.log.err("failed to open '{s}' with {s}", .{ filepath, @errorName(err) });
+            },
+        }
+        return error.Failed;
+    };
 }
