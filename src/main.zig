@@ -2,7 +2,7 @@ const std = @import("std");
 
 const builtin = @import("builtin");
 
-pub fn main() !void {
+pub fn main() !u8 {
     var gpa = if (builtin.mode == .Debug) blk: {
         std.log.info("builtin.mode == .Debug", .{});
         const GpaAlloc = std.heap.GeneralPurposeAllocator(.{});
@@ -30,7 +30,26 @@ pub fn main() !void {
     // cause a memory leak on purpose to observe the leak detector
     //_ = try allocator.create(u8);
 
+    var filepath = try allocator.dupe(u8, ".env");
+    _ = args.next();
     while (args.next()) |arg| {
         std.log.info("{s}", .{arg});
+
+        if (std.mem.eql(u8, "-f", arg)) {
+            if (args.next()) |f| {
+                allocator.free(filepath);
+                filepath = try allocator.dupe(u8, f);
+            } else {
+                std.log.err("error: option '-f' requires an argument <envfile>", .{});
+                return 1;
+            }
+            continue;
+        }
+
+        std.log.err("error: '{s}' is not a recognized flag, option, or argument", .{arg});
+        return 1;
     }
+
+    allocator.free(filepath);
+    return 0;
 }
