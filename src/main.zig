@@ -27,8 +27,7 @@ pub fn main() !u8 {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
-    var filepath: ?[]const u8 = null;
-    var force_stdin = false;
+    var maybe_filepath: ?[]const u8 = null;
     var write = false;
 
     _ = args.next();
@@ -36,11 +35,8 @@ pub fn main() !u8 {
         std.log.info("{s}", .{arg});
 
         if (std.mem.eql(u8, "-f", arg)) {
-            if (args.next()) |_filepath| {
-                if (std.mem.eql(u8, "-", _filepath)) {
-                    force_stdin = true;
-                }
-                filepath = _filepath;
+            if (args.next()) |filepath| {
+                maybe_filepath = filepath;
             } else {
                 std.log.err("option '-f' requires an argument <envfile>", .{});
                 return 1;
@@ -57,12 +53,16 @@ pub fn main() !u8 {
         return 1;
     }
 
-    const is_stdin = force_stdin;
-    var file = if (is_stdin)
-        std.io.getStdIn()
+    const is_tty = std.os.isatty(std.os.STDIN_FILENO);
+    const read_file = if (maybe_filepath) |filepath|
+        !std.mem.eql(u8, "-", filepath)
+    else if (is_tty) true else false;
+
+    var file = if (read_file)
+        openFile(maybe_filepath orelse ".env", write) catch return 1
     else
-        openFile(filepath, write) catch return 1;
-    defer if (!is_stdin) file.close();
+        std.io.getStdIn();
+    defer if (read_file) file.close();
 
     const reader = file.reader();
     var b = try reader.readByte();
@@ -71,9 +71,7 @@ pub fn main() !u8 {
     return 0;
 }
 
-inline fn openFile(maybe_filepath: ?[]const u8, write: bool) error{Failed}!std.fs.File {
-    var filepath = maybe_filepath orelse ".env";
-
+inline fn openFile(filepath: []const u8, write: bool) error{Failed}!std.fs.File {
     return std.fs.cwd().openFile(
         filepath,
         .{
