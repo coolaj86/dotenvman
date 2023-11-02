@@ -2,6 +2,7 @@ const std = @import("std");
 
 const builtin = @import("builtin");
 
+const String = std.ArrayListUnmanaged(u8);
 const HashMap = std.StringHashMapUnmanaged([]const u8);
 const ErrorMessages = struct {
     const all_caps = "ENVs must begin with 'export ' or ALL_CAPS, not e{s}";
@@ -106,11 +107,15 @@ pub const Env = struct {
     pub fn parse(env: *Env, reader: anytype) !void {
         var state: State = .start;
 
+        var name_buf = String{};
+        defer name_buf.deinit(env.allocator);
+
+        var value_buf = String{};
+        defer value_buf.deinit(env.allocator);
+
         // '#' ignore all until end of line
         // 'export ' ignore
         // 'UPPER_SNAKES'
-        var name_buf = std.ArrayListUnmanaged(u8){};
-        defer name_buf.deinit(env.allocator);
         state_loop: while (true) {
             // we only handle UTF-8 - because we're sane
             const char = try reader.readByte();
@@ -146,7 +151,10 @@ pub const Env = struct {
                                     },
                                     '=' => {
                                         state = .value;
-                                        // TODO read literal values
+                                        try env.consumeValue(reader, &value_buf);
+                                        std.log.info("{s}={s}", .{ name_buf.items, value_buf.items });
+                                        // TODO put into map
+                                        value_buf.items.len = 0;
                                         break;
                                     },
                                     else => {
@@ -168,6 +176,101 @@ pub const Env = struct {
                     return error.Failed;
                 },
             }
+        }
+    }
+
+    inline fn consumeValue(env: *Env, reader: anytype, value_buf: *String) !void {
+        const first = try reader.readByte();
+        switch (first) {
+            ' ', '\t' => {
+                const next = try reader.readByte();
+                switch (next) {
+                    '\r', '\n' => {
+                        return;
+                    },
+                    else => {
+                        // TODO be more specific
+                        return error.Failed;
+                    },
+                }
+            },
+            '\r', '\n' => {
+                return;
+            },
+            '\'' => {
+                while (true) {
+                    // EOF is a true error if we hit it during a quoted value
+                    const next = try reader.readByte();
+                    if ('\'' == next) {
+                        // TODO unless a quote starts, it must be end-of-line or error
+                        break;
+                    }
+                    try value_buf.append(env.allocator, next);
+                }
+            },
+            '"' => {
+                // TODO quoted-expression rules
+                while (true) {
+                    // EOF is a true error if we hit it during a quoted value
+                    const next = try reader.readByte();
+                    if ('"' == next) {
+                        // TODO unless a quote starts, it must be end-of-line or error
+                        break;
+                    }
+                    try value_buf.append(env.allocator, next);
+                }
+            },
+            else => {
+                // TODO whitespace-ends-expression rules
+                try value_buf.append(env.allocator, first);
+                while (true) {
+                    // EOF is a true error if we hit it during a quoted value
+                    const next = reader.readByte() catch |err| {
+                        switch (err) {
+                            error.EndOfStream => {
+                                return;
+                            },
+                            else => {
+                                //return error.Failed;
+                                return err;
+                            },
+                        }
+                    };
+                    //if ('\r' == next || '\n' == next) {
+                    switch (next) {
+                        '\r', '\n' => {
+                            return;
+                        },
+                        ' ', '\t' => {
+                            while (true) {
+                                const last = reader.readByte() catch |err| {
+                                    switch (err) {
+                                        error.EndOfStream => {
+                                            return;
+                                        },
+                                        else => {
+                                            return err;
+                                            //return error.Failed;
+                                        },
+                                    }
+                                };
+                                switch (last) {
+                                    ' ', '\t' => {},
+                                    '\r', '\n' => {
+                                        return;
+                                    },
+                                    else => {
+                                        return error.Failed;
+                                    },
+                                }
+                            }
+                        },
+                        else => {
+                            try value_buf.append(env.allocator, next);
+                        },
+                    }
+                }
+            },
         }
     }
 };
