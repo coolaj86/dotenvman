@@ -46,11 +46,11 @@ Global options
 -f, --file=  # path to envfile
 ```
 
-**ProTips**™ for success:
-- use `get` and `set`
+**ProTips**™:
 - use `ALL_CAPS` for keys
-- use _SINGLE QUOTES_ for values
-  - unless you need a single quote as part of a value
+- stick to `get` and `set` (for literals - since variables)
+- use **single quotes** for values
+- use `'\''` to put a single quote in a single-quoted value
 
 ### Set & Get Literal Values
 
