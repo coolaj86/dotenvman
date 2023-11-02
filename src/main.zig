@@ -19,8 +19,11 @@ pub fn main() !u8 {
     };
     defer if (builtin.mode == .Debug) {
         std.debug.print("Checking for memory leaks...", .{});
-        _ = gpa.deinit();
-        std.debug.print(" OK (all memory deallocated)\n", .{});
+        if (gpa.deinit() == .ok) {
+            std.debug.print(" OK (all memory deallocated)\n", .{});
+        } else {
+            std.log.err("Oops! Got some memory unleakin' to do!", .{});
+        }
     };
 
     var allocator = if (builtin.mode == .Debug) blk: {
