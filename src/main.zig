@@ -146,6 +146,7 @@ pub const Env = struct {
                                     },
                                     '=' => {
                                         state = .value;
+                                        // TODO read literal values
                                         break;
                                     },
                                     else => {
