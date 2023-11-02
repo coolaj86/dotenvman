@@ -4,17 +4,11 @@ Read, Write, and Manage .env files in a POSIX-compliant way, \
 and preserve comments!
 
 ```sh
-dotenvman get <NAME>              # literal
-dotenvman set <NAME> <value>      # single-quoted
-dotenvman getx <NAME>             # evaluated
-dotenvman setx <NAME> <value>     # double-quoted
-dotenvman -f <envfile> run <cmd>  # load ENVs and run
-```
+# read
+dotenvman -f ./local.env get ACME_API_TOKEN
 
-Global options
-
-```sh
--f, --file=  # path to envfile
+# write
+dotenvman -f ./local.env set ACME_API_TOKEN='abc$123#'
 ```
 
 ## Table of Contents
@@ -36,7 +30,23 @@ TODO.
 
 ## Usage
 
-Generally speaking:
+```sh
+dotenvman get <NAME>              # literal
+dotenvman set <NAME> <value>      # single-quoted
+
+dotenvman getx <NAME>             # evaluated
+dotenvman setx <NAME> <value>     # double-quoted
+
+dotenvman -f <envfile> run <cmd>  # load ENVs and run
+```
+
+Global options
+
+```sh
+-f, --file=  # path to envfile
+```
+
+**ProTips**™ for success:
 - use `get` and `set`
 - use `ALL_CAPS` for keys
 - use _SINGLE QUOTES_ for values
