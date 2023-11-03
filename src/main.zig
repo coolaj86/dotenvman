@@ -105,6 +105,8 @@ pub const Env = struct {
         chomp_export,
         read_unquoted,
         read_literal,
+        read_quoted,
+        read_variable,
         chomp_eol,
     };
 
@@ -234,6 +236,9 @@ pub const Env = struct {
                                 '\'' => {
                                     // don't change to .read_literal
                                 },
+                                '"' => {
+                                    // don't change to .read_quoted
+                                },
                                 '\\' => {
                                     //try str_buf.append(env.allocator, next);
                                     // don't change behavior
@@ -256,6 +261,11 @@ pub const Env = struct {
                             // TODO don't store quote, but mark as literal
                             try str_buf.append(env.allocator, char);
                             state = .read_literal;
+                        },
+                        '"' => {
+                            // TODO don't store quote, but mark as variable
+                            try str_buf.append(env.allocator, char);
+                            state = .read_quoted;
                         },
                         ' ', '\t' => {
                             // TODO track literal or quoted state
@@ -296,9 +306,57 @@ pub const Env = struct {
                         //},
                         else => {
                             try str_buf.append(env.allocator, char);
-                            try writer.writeByte(char);
                         },
                     }
+                },
+                .read_quoted => {
+                    var char = try reader.readByte();
+                    try writer.writeByte(char);
+                    switch (char) {
+                        '\\' => {
+                            try writer.writeByte(char);
+                            // TODO escape the next thing (space, newline, etc)
+                            // (or just don't allow unquoted escapes)
+                            var next = try reader.readByte();
+                            try str_buf.append(env.allocator, next);
+                            switch (next) {
+                                '"' => {
+                                    // don't change to .read_unquoted
+                                },
+                                '\\' => {
+                                    // TODO don't keep extra \ in value (debug only)
+                                    //try str_buf.append(env.allocator, next);
+
+                                    // don't change behavior
+                                },
+                                '$' => {
+                                    //try str_buf.append(env.allocator, next);
+                                    // don't change behavior
+                                },
+                                else => {
+                                    std.log.err("unexpected escape value \\{c}", .{next});
+                                    return error.Failed;
+                                },
+                            }
+                        },
+                        '"' => {
+                            // TODO don't store quote, but mark as literal
+                            try str_buf.append(env.allocator, char);
+                            state = .read_unquoted;
+                        },
+                        '$' => {
+                            // TODO read { and track
+                            try str_buf.append(env.allocator, char);
+                            state = .read_variable;
+                        },
+                        else => {
+                            try str_buf.append(env.allocator, char);
+                        },
+                    }
+                },
+                .read_variable => {
+                    std.log.err("TODO: we can't read vars yet!", .{});
+                    return error.Failed;
                 },
                 .chomp_eol => {
                     var char = reader.readByte() catch |err| switch (err) {
