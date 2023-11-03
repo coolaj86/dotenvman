@@ -5,11 +5,14 @@ const builtin = @import("builtin");
 const String = std.ArrayListUnmanaged(u8);
 const HashMap = std.StringHashMapUnmanaged([]const u8);
 const ErrorMessages = struct {
-    const all_caps = "ENVs must begin with 'export' or 'ALL_CAPS=', not '{s}'";
-    const all_caps_esc = "ENVs must begin with 'export' or 'ALL_CAPS=', not \"{}\"";
-    const expect_alpha = "ENV keys must begin with 'A-Z' or '_', not '{c}'";
-    const export_space = "expected whitespace after 'export' but got '{c}'";
-    const expect_eol = "expected end of line (or file), but got '{c}'";
+    const all_caps = "ENVs must begin with 'export' or 'ALL_CAPS=', saw '{s}'";
+    const all_caps_esc = "ENVs must begin with 'export' or 'ALL_CAPS=', saw \"{}\"";
+    const expect_alpha_start = "ENVs must begin with 'A-Z', not '{c}'";
+    const expect_alpha_middle = "ENVs may only use [0-9_A-Z], not '{c}'";
+    const expect_alpha_end = "ENVs must end with 'A-Z0-9', not '{c}'";
+    const export_space = "expected <space> or <tab> after 'export', saw '{c}'";
+    const expect_eol = "expected end of line (or file), saw '{c}'";
+    const quote_dollar = "'$' must be quoted, ex: '$1.00' or \"$FOOBAR\"";
     const duplicate_key = "duplicated key '{s}='";
 };
 
@@ -134,6 +137,8 @@ pub const Env = struct {
 
     /// caller should provide arena and deinit after use
     pub fn parse(env: *Env, src_reader: anytype, writer: anytype) !void {
+        var envMap = try std.process.getEnvMap(env.allocator);
+        defer envMap.deinit();
         var state: State = .chomp_prefix;
         var quote_style: QuoteStyle = .unquoted;
 
@@ -212,10 +217,9 @@ pub const Env = struct {
                         },
                         '0'...'9' => {
                             if (is_first_char_of_key) {
-                                std.log.err(ErrorMessages.expect_alpha, .{char});
+                                std.log.err(ErrorMessages.expect_alpha_start, .{char});
                                 return error.Failed;
                             }
-                            // TODO must begin with [A-Z_]
                             try key_buf.append(env.allocator, char);
                             try writer.writeByte(char);
                         },
@@ -280,6 +284,9 @@ pub const Env = struct {
                         '"' => {
                             if (env.debug) try val_buf.append(env.allocator, char);
                             state = .read_quoted;
+                        },
+                        '$' => {
+                            std.log.err(ErrorMessages.quote_dollar, .{});
                         },
                         ' ', '\t' => {
                             // continuation of the output string 'MY_KEY='
@@ -376,9 +383,52 @@ pub const Env = struct {
                             state = .read_unquoted;
                         },
                         '$' => {
-                            // TODO read { and track
-                            try val_buf.append(env.allocator, char);
-                            state = .read_variable;
+                            var_buf.items.len = 0;
+
+                            var next = try reader.readByte();
+                            var is_curly_var = next == '{';
+                            if (!is_curly_var) {
+                                try peek_reader.putBackByte(next);
+                            }
+                            // TODO get feedback / code review on use of 0
+                            next = env.readName(reader, &var_buf) catch |err| switch (err) {
+                                error.EndOfStream => 0,
+                                else => return err,
+                            };
+                            switch (next) {
+                                0, '}' => {},
+                                else => try peek_reader.putBackByte(next),
+                            }
+
+                            if (is_curly_var) {
+                                if (next != '}') {
+                                    std.log.err("variable not closed, saw ${c}{s}", .{ '{', var_buf.items });
+                                    return error.Failed;
+                                }
+                            }
+
+                            if (env.debug) {
+                                try val_buf.append(env.allocator, '$');
+                                if (is_curly_var) {
+                                    try val_buf.append(env.allocator, '{');
+                                }
+                                try val_buf.appendSlice(env.allocator, var_buf.items);
+                                try val_buf.append(env.allocator, '=');
+                            }
+
+                            if (env.map.get(var_buf.items)) |val| {
+                                try val_buf.appendSlice(env.allocator, val);
+                            } else if (envMap.get(var_buf.items)) |val| {
+                                try val_buf.appendSlice(env.allocator, val);
+                            } else {
+                                std.log.err("[warn] accessed undefined ENV '${s}'", .{var_buf.items});
+                            }
+
+                            if (env.debug) {
+                                if (is_curly_var) {
+                                    try val_buf.append(env.allocator, '}');
+                                }
+                            }
                         },
                         else => {
                             try val_buf.append(env.allocator, char);
@@ -405,10 +455,6 @@ pub const Env = struct {
 
                     try val_buf.append(env.allocator, char);
                     state = .read_quoted;
-                },
-                .read_variable => {
-                    std.log.err("TODO: we can't read vars yet!", .{});
-                    return error.Failed;
                 },
                 .chomp_eol => {
                     var char = reader.readByte() catch |err| switch (err) {
@@ -454,7 +500,73 @@ pub const Env = struct {
         return error.Failed;
     }
 
-    inline fn normalizeCrlf(env: *Env, next: u8, writer: anytype) !void {
+    /// Reads a POSIX Environment Variable (strict subset of POSIX Name)
+    ///
+    /// TODO --lax-name to permit any POSIX Name as an ENV Name
+    ///
+    /// From POSIX 8.1:
+    ///   Environment variable names consist solely of uppercase letters,
+    ///   digits, and the <underscore> ( '_' )
+    ///
+    /// From POSIX 3.235:
+    ///   A name is a word consisting of underscores, digits, and alphabetics
+    ///   from the portable character set.
+    ///   The first character of a name is not a digit.
+    ///
+    /// We further restrict the POSIX Environment Variable Name in which
+    ///   - the first character is not '_' (must be [A-Z])
+    ///   - the last character is not '_' (must be [A-Z0-9])
+    ///
+    /// See also:
+    ///
+    ///   - POSIX Environment Variable Definition
+    ///     https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap08.html#tag_08_01
+    ///   - POSIX Other Environment Variables
+    ///     https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap08.html#tag_08_03
+    ///   - POSIX Name ([A-Z_a-z][0-9A-Z_a-z]+)
+    ///     https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap03.html#tag_03_235
+    ///   - POSIX Portable Character Set (ASCII bytes 0, 7-9, 10-13, 32-126)
+    ///     https://pubs.opengroup.org/onlinepubs/009696899/basedefs/xbd_chap06.html#tag_06_01
+    fn readName(env: *Env, reader: anytype, var_buf: *String) !u8 {
+        // Start Pattern: [A-Z]
+        var char = try reader.readByte();
+        switch (char) {
+            'A'...'Z' => {
+                try var_buf.append(env.allocator, char);
+            },
+            // TODO: error message for '_': consider commenting out unused ENVs
+            else => {
+                std.log.err(ErrorMessages.expect_alpha_start, .{char});
+                return error.Failed;
+            },
+        }
+
+        // Word Pattern: [0-9_A-Z]
+        var prev = char;
+        while (true) {
+            char = try reader.readByte();
+            switch (char) {
+                'A'...'Z', '0'...'9', '_' => {
+                    try var_buf.append(env.allocator, char);
+                },
+                else => {
+                    break;
+                },
+            }
+            prev = char;
+        }
+
+        // End Pattern: [A-Z0-9]
+        if (prev == '_') {
+            // TODO: error message for '_': consider commenting out unused ENVs
+            std.log.err(ErrorMessages.expect_alpha_end, .{char});
+            return error.Failed;
+        }
+
+        return char;
+    }
+
+    fn normalizeCrlf(env: *Env, next: u8, writer: anytype) !void {
         var next_is_newline = switch (next) {
             '\n' => true,
             else => false,
@@ -477,7 +589,7 @@ pub const Env = struct {
         }
     }
 
-    inline fn consumeComment(char: u8, reader: anytype, writer: anytype) !void {
+    fn consumeComment(char: u8, reader: anytype, writer: anytype) !void {
         try writer.writeByte(char);
         while (true) {
             var next = try reader.readByte();
@@ -498,7 +610,7 @@ pub const Env = struct {
         }
     }
 
-    inline fn mustConsumeExport(reader: anytype, writer: anytype) !void {
+    fn mustConsumeExport(reader: anytype, writer: anytype) !void {
         const chars = try reader.readBytesNoEof(6);
         if (!std.mem.eql(u8, "export", &chars)) {
             std.log.err(ErrorMessages.all_caps, .{chars});
@@ -507,7 +619,7 @@ pub const Env = struct {
         try writer.writeAll(&chars);
     }
 
-    inline fn mustConsumeSpaces(reader: anytype) !u8 {
+    fn mustConsumeSpaces(reader: anytype) !u8 {
         var has_space = false;
         while (true) {
             var next = try reader.readByte();
@@ -526,7 +638,7 @@ pub const Env = struct {
         }
     }
 
-    inline fn consumeValue(env: *Env, reader: anytype, value_buf: *String) !void {
+    fn consumeValue(env: *Env, reader: anytype, value_buf: *String) !void {
         _ = env;
         _ = reader;
         _ = value_buf;
@@ -536,7 +648,7 @@ pub const Env = struct {
     }
 };
 
-inline fn openFile(filepath: []const u8, write: bool) error{Failed}!std.fs.File {
+fn openFile(filepath: []const u8, write: bool) error{Failed}!std.fs.File {
     return std.fs.cwd().openFile(
         filepath,
         .{
