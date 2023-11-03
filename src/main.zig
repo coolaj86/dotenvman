@@ -6,7 +6,10 @@ const String = std.ArrayListUnmanaged(u8);
 const HashMap = std.StringHashMapUnmanaged([]const u8);
 const ErrorMessages = struct {
     const all_caps = "ENVs must begin with 'export' or 'ALL_CAPS=', not '{s}'";
+    const all_caps_esc = "ENVs must begin with 'export' or 'ALL_CAPS=', not \"{}\"";
+    const expect_alpha = "ENV keys must begin with 'A-Z' or '_', not '{c}'";
     const export_space = "expected whitespace after 'export' but got '{c}'";
+    const expect_eol = "expected end of line (or file), but got '{c}'";
     const duplicate_key = "duplicated key '{s}='";
 };
 
@@ -100,8 +103,9 @@ pub const Env = struct {
         chomp_prefix,
         read_key,
         chomp_export,
-        chomp_whitespace,
         read_unquoted,
+        read_literal,
+        chomp_eol,
     };
 
     allocator: std.mem.Allocator,
@@ -117,6 +121,7 @@ pub const Env = struct {
         var state: State = .chomp_prefix;
         //var prev: State = .read_key;
 
+        var is_first = true;
         var str_buf = String{};
         defer str_buf.deinit(env.allocator);
 
@@ -146,23 +151,18 @@ pub const Env = struct {
                             // chomp chomp chomp!
                             // (no leading or trailing spaces)
                         },
-                        '\r', '\n' => {
+                        '\r' => {
+                            // TODO check for \n
+                            try writer.writeByte(char);
+                        },
+                        '\n' => {
                             try writer.writeByte(char);
                         },
                         '#' => {
-                            try writer.writeByte(char);
-                            while (true) {
-                                var next = try reader.readByte();
-                                switch (next) {
-                                    '\r', '\n' => {
-                                        try writer.writeByte(char);
-                                        break;
-                                    },
-                                    else => {
-                                        try writer.writeByte(char);
-                                    },
-                                }
-                            }
+                            consumeComment(char, reader, writer) catch |err| switch (err) {
+                                error.EndOfStream => break,
+                                else => return err,
+                            };
                         },
                         else => {
                             try peek_reader.putBackByte(char);
@@ -181,48 +181,182 @@ pub const Env = struct {
                             try peek_reader.putBackByte(next);
                             try writer.writeByte(' ');
                         },
-                        'A'...'Z' => {
+                        'A'...'Z', '_' => {
+                            is_first = false;
+                            try str_buf.append(env.allocator, char);
+                            try writer.writeByte(char);
+                        },
+                        '0'...'9' => {
+                            if (is_first) {
+                                std.log.err(ErrorMessages.expect_alpha, .{char});
+                                return error.Failed;
+                            }
+                            // TODO must begin with [A-Z_]
                             try str_buf.append(env.allocator, char);
                             try writer.writeByte(char);
                         },
                         '=' => {
+                            is_first = true;
                             const key = str_buf.items;
                             if (env.map.contains(key)) {
                                 std.log.err(ErrorMessages.duplicate_key, .{key});
                                 return error.Failed;
                             }
-                            std.log.info("{s}=", .{key});
+                            std.debug.print("{s}=", .{key});
 
                             try writer.writeByte(char);
+                            // TODO dupe keyname somewhere
+                            str_buf.items.len = 0;
                             state = .read_unquoted;
                         },
                         else => {
-                            // TODO
+                            try str_buf.append(env.allocator, char);
+
+                            // std.debug.print("{}", .{std.zig.fmtEscapes(bytes)})
                             // https://ziglang.org/documentation/master/std/#A;std:zig.fmtEscapes
-                            switch (char) {
-                                '\r' => {
-                                    try str_buf.append(env.allocator, '\\');
-                                    try str_buf.append(env.allocator, 'r');
-                                },
-                                '\n' => {
-                                    try str_buf.append(env.allocator, '\\');
-                                    try str_buf.append(env.allocator, 'n');
-                                },
-                                else => {
-                                    try str_buf.append(env.allocator, char);
-                                },
-                            }
-                            std.log.err(ErrorMessages.all_caps, .{str_buf.items});
+                            std.log.err(ErrorMessages.all_caps_esc, .{std.zig.fmtEscapes(str_buf.items)});
+                            //std.log.err(ErrorMessages.all_caps, .{str_buf.items});
                             return error.Failed;
                         },
                     }
                 },
                 .read_unquoted => {
-                    std.log.err("that's all that's implemented right now", .{});
-                    return error.Failed;
+                    var char = try reader.readByte();
+                    switch (char) {
+                        '\\' => {
+                            try writer.writeByte(char);
+                            // TODO escape the next thing (space, newline, etc)
+                            // (or just don't allow unquoted escapes)
+                            var next = try reader.readByte();
+                            try writer.writeByte(next);
+                            try str_buf.append(env.allocator, next);
+                            switch (next) {
+                                '\'' => {
+                                    // don't change to .read_literal
+                                },
+                                '\\' => {
+                                    //try str_buf.append(env.allocator, next);
+                                    // don't change behavior
+                                },
+                                '\r' => {
+                                    // TODO check if the next char is `\n` and treat as a unit
+                                    std.log.err("NO \\r! STOP USING WINDOWS! (you hurt my feelings)", .{});
+                                    return error.Failed;
+                                },
+                                ' ', '\t', '\n' => {
+                                    // don't change from .read_unquoted
+                                },
+                                else => {
+                                    std.log.err("unexpected escape value \\{c}", .{next});
+                                    return error.Failed;
+                                },
+                            }
+                        },
+                        '\'' => {
+                            // TODO don't store quote, but mark as literal
+                            try str_buf.append(env.allocator, char);
+                            state = .read_literal;
+                        },
+                        ' ', '\t' => {
+                            // TODO track literal or quoted state
+                            // continuation of MY_KEY=
+                            std.debug.print("{s}\n", .{str_buf.items});
+                            //std.debug.print("{'}\n", .{std.zig.fmtEscapes(str_buf.items)});
+                            str_buf.items.len = 0;
+                            state = .chomp_eol;
+                        },
+                        '\r', '\n' => {
+                            // TODO read for \n after \r
+                            // continuation of MY_KEY=
+                            std.debug.print("{s}\n", .{str_buf.items});
+                            //std.debug.print("{'}\n", .{std.zig.fmtEscapes(str_buf.items)});
+                            str_buf.items.len = 0;
+                            try writer.writeByte(char);
+                            state = .chomp_prefix;
+                        },
+                        else => {
+                            try str_buf.append(env.allocator, char);
+                            try writer.writeByte(char);
+                        },
+                    }
+                },
+                .read_literal => {
+                    var char = try reader.readByte();
+                    try writer.writeByte(char);
+                    switch (char) {
+                        '\'' => {
+                            // TODO don't read ending quote (just store state)
+                            try str_buf.append(env.allocator, char);
+                            state = .read_unquoted;
+                        },
+                        //'\\' => {
+                        //    // TODO for the purpose of a value, we may not want to do this...
+                        //    // because std.log.info() will interpret it
+                        //    //try str_buf.append(env.allocator, char);
+                        //},
+                        else => {
+                            try str_buf.append(env.allocator, char);
+                            try writer.writeByte(char);
+                        },
+                    }
+                },
+                .chomp_eol => {
+                    var char = reader.readByte() catch |err| switch (err) {
+                        error.EndOfStream => break,
+                        else => return err,
+                    };
+                    switch (char) {
+                        ' ', '\t' => {
+                            // chomp chomp chomp
+                        },
+                        '\r' => {
+                            // TODO check for \n
+                            try writer.writeByte(char);
+                            state = .chomp_prefix;
+                        },
+                        '\n' => {
+                            try writer.writeByte(char);
+                            state = .chomp_prefix;
+                        },
+                        '#' => {
+                            try writer.writeByte(' ');
+                            consumeComment(char, reader, writer) catch |err| switch (err) {
+                                error.EndOfStream => break,
+                                else => return err,
+                            };
+                            state = .chomp_prefix;
+                        },
+                        else => {
+                            std.log.err(ErrorMessages.expect_eol, .{char});
+                            return error.Failed;
+                        },
+                    }
                 },
                 else => {
                     break :state_loop;
+                },
+            }
+        }
+        std.log.err("that's all that's implemented right now", .{});
+        return error.Failed;
+    }
+
+    inline fn consumeComment(char: u8, reader: anytype, writer: anytype) !void {
+        try writer.writeByte(char);
+        while (true) {
+            var next = try reader.readByte();
+            switch (next) {
+                '\r' => {
+                    // TODO check for \n
+                    try writer.writeByte(char);
+                    break;
+                },
+                '\n' => {
+                    try writer.writeByte(char);
+                    break;
+                },
+                else => {
+                    try writer.writeByte(char);
                 },
             }
         }
