@@ -1,8 +1,9 @@
 #
 # Good
 #
-export FOO= # ignore me
+export EMPTY= # ignore me
 
+FOO=bar
 SECRET=foo''bar\ baz
 
 SECRET2='foo\ bar'
@@ -10,4 +11,4 @@ SECRET2='foo\ bar'
 # "foo\\ bar" (in case the formatter eats it)
 SECRET3="foo\\ bar"
 
-SECRET4="foo\\ bar$BAZ${QUX}"
+SECRET4="foo\\ bar$FOO${PWD}$BAZ"
