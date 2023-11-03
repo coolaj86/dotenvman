@@ -1,0 +1,7 @@
+#
+# Errors
+#
+
+NO_EQUALS
+SECRET4="foo\ bar"
+99_RED_BALLOONS=
