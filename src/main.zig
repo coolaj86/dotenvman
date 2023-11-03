@@ -112,8 +112,21 @@ pub const Env = struct {
         chomp_eol,
     };
 
+    pub const QuoteStyle = enum {
+        unquoted,
+        literal,
+        quoted,
+    };
+
+    pub const NewlineStyle = enum {
+        crlf,
+        newline,
+    };
+
     allocator: std.mem.Allocator,
     map: HashMap = .{},
+    newline_style: ?NewlineStyle = null,
+    debug: bool = true,
 
     pub fn deinit(env: *Env) void {
         env.map.deinit(env.allocator);
@@ -121,13 +134,16 @@ pub const Env = struct {
 
     /// caller should provide arena and deinit after use
     pub fn parse(env: *Env, src_reader: anytype, writer: anytype) !void {
-        //var had_cr = true; // preserve windows whitespace
         var state: State = .chomp_prefix;
-        //var prev: State = .read_key;
+        var quote_style: QuoteStyle = .unquoted;
 
-        var is_first = true;
-        var str_buf = String{};
-        defer str_buf.deinit(env.allocator);
+        var is_first_char_of_key = true;
+        var key_buf = String{};
+        var val_buf = String{};
+        var var_buf = String{};
+        defer key_buf.deinit(env.allocator);
+        defer val_buf.deinit(env.allocator);
+        defer var_buf.deinit(env.allocator);
 
         // var buffered_reader = std.io.BufferedReader(
         //     4096,
@@ -156,10 +172,14 @@ pub const Env = struct {
                             // (no leading or trailing spaces)
                         },
                         '\r' => {
-                            // TODO check for \n
-                            try writer.writeByte(char);
+                            var next = try reader.readByte();
+                            try env.normalizeCrlf(next, writer);
+                            try peek_reader.putBackByte(next);
                         },
                         '\n' => {
+                            if (env.newline_style == null) {
+                                env.newline_style = .newline;
+                            }
                             try writer.writeByte(char);
                         },
                         '#' => {
@@ -178,7 +198,7 @@ pub const Env = struct {
                     var char = try reader.readByte();
                     switch (char) {
                         'e' => {
-                            try peek_reader.putBackByte(char);
+                            try peek_reader.putBackByte('e');
                             try mustConsumeExport(reader, writer);
 
                             const next = try mustConsumeSpaces(reader);
@@ -186,22 +206,22 @@ pub const Env = struct {
                             try writer.writeByte(' ');
                         },
                         'A'...'Z', '_' => {
-                            is_first = false;
-                            try str_buf.append(env.allocator, char);
+                            is_first_char_of_key = false;
+                            try key_buf.append(env.allocator, char);
                             try writer.writeByte(char);
                         },
                         '0'...'9' => {
-                            if (is_first) {
+                            if (is_first_char_of_key) {
                                 std.log.err(ErrorMessages.expect_alpha, .{char});
                                 return error.Failed;
                             }
                             // TODO must begin with [A-Z_]
-                            try str_buf.append(env.allocator, char);
+                            try key_buf.append(env.allocator, char);
                             try writer.writeByte(char);
                         },
                         '=' => {
-                            is_first = true;
-                            const key = str_buf.items;
+                            is_first_char_of_key = true;
+                            const key = key_buf.items;
                             if (env.map.contains(key)) {
                                 std.log.err(ErrorMessages.duplicate_key, .{key});
                                 return error.Failed;
@@ -210,16 +230,37 @@ pub const Env = struct {
 
                             try writer.writeByte(char);
                             // TODO dupe keyname somewhere
-                            str_buf.items.len = 0;
-                            state = .read_unquoted;
+
+                            key_buf.items.len = 0;
+                            val_buf.items.len = 0;
+                            var_buf.items.len = 0;
+
+                            var next = try reader.readByte();
+                            switch (next) {
+                                '\'' => {
+                                    if (env.debug) try val_buf.append(env.allocator, next);
+                                    quote_style = .literal;
+                                    state = .read_literal;
+                                },
+                                '"' => {
+                                    if (env.debug) try val_buf.append(env.allocator, next);
+                                    quote_style = .quoted;
+                                    state = .read_quoted;
+                                },
+                                else => {
+                                    quote_style = .unquoted;
+                                    state = .read_unquoted;
+                                    try peek_reader.putBackByte(next);
+                                },
+                            }
                         },
                         else => {
-                            try str_buf.append(env.allocator, char);
+                            try key_buf.append(env.allocator, char);
 
                             // std.debug.print("{}", .{std.zig.fmtEscapes(bytes)})
                             // https://ziglang.org/documentation/master/std/#A;std:zig.fmtEscapes
-                            std.log.err(ErrorMessages.all_caps_esc, .{std.zig.fmtEscapes(str_buf.items)});
-                            //std.log.err(ErrorMessages.all_caps, .{str_buf.items});
+                            std.log.err(ErrorMessages.all_caps_esc, .{std.zig.fmtEscapes(key_buf.items)});
+                            //std.log.err(ErrorMessages.all_caps, .{key_buf.items});
                             return error.Failed;
                         },
                     }
@@ -228,38 +269,45 @@ pub const Env = struct {
                     var char = try reader.readByte();
                     switch (char) {
                         '\\' => {
+                            if (env.debug) try val_buf.append(env.allocator, char);
                             try writer.writeByte(char);
                             state = .read_unquoted_escape;
                         },
                         '\'' => {
-                            // TODO don't store quote, but mark as literal
-                            try str_buf.append(env.allocator, char);
+                            if (env.debug) try val_buf.append(env.allocator, char);
                             state = .read_literal;
                         },
                         '"' => {
-                            // TODO don't store quote, but mark as variable
-                            try str_buf.append(env.allocator, char);
+                            if (env.debug) try val_buf.append(env.allocator, char);
                             state = .read_quoted;
                         },
                         ' ', '\t' => {
-                            // TODO track literal or quoted state
-                            // continuation of MY_KEY=
-                            std.debug.print("{s}\n", .{str_buf.items});
-                            //std.debug.print("{'}\n", .{std.zig.fmtEscapes(str_buf.items)});
-                            str_buf.items.len = 0;
+                            // continuation of the output string 'MY_KEY='
+                            std.debug.print("{s}\n", .{val_buf.items});
+                            //std.debug.print("{'}\n", .{std.zig.fmtEscapes(val_buf.items)});
+                            val_buf.items.len = 0;
+                            var_buf.items.len = 0;
                             state = .chomp_eol;
                         },
-                        '\r', '\n' => {
+                        '\r' => {
+                            var next = try reader.readByte();
+                            try env.normalizeCrlf(next, writer);
+                            try peek_reader.putBackByte(next);
+                        },
+                        '\n' => {
+                            if (env.newline_style == null) {
+                                env.newline_style = .newline;
+                            }
                             // TODO read for \n after \r
                             // continuation of MY_KEY=
-                            std.debug.print("{s}\n", .{str_buf.items});
-                            //std.debug.print("{'}\n", .{std.zig.fmtEscapes(str_buf.items)});
-                            str_buf.items.len = 0;
+                            std.debug.print("{s}\n", .{val_buf.items});
+                            //std.debug.print("{'}\n", .{std.zig.fmtEscapes(val_buf.items)});
+                            val_buf.items.len = 0;
                             try writer.writeByte(char);
                             state = .chomp_prefix;
                         },
                         else => {
-                            try str_buf.append(env.allocator, char);
+                            try val_buf.append(env.allocator, char);
                             try writer.writeByte(char);
                         },
                     }
@@ -267,30 +315,35 @@ pub const Env = struct {
                 .read_unquoted_escape => {
                     // TODO escape the next thing (space, newline, etc)
                     // (or just don't allow unquoted escapes)
-                    var next = try reader.readByte();
-                    try writer.writeByte(next);
-                    try str_buf.append(env.allocator, next);
-                    switch (next) {
+                    var char = try reader.readByte();
+                    try writer.writeByte(char);
+                    try val_buf.append(env.allocator, char);
+                    switch (char) {
                         '\'' => {
+                            if (env.debug) try val_buf.append(env.allocator, char);
                             // don't change to .read_literal
                         },
                         '"' => {
+                            if (env.debug) try val_buf.append(env.allocator, char);
                             // don't change to .read_quoted
                         },
                         '\\' => {
-                            //try str_buf.append(env.allocator, next);
+                            if (env.debug) try val_buf.append(env.allocator, char);
                             // don't change behavior
                         },
                         '\r' => {
-                            // TODO check if the next char is `\n` and treat as a unit
-                            std.log.err("NO \\r! STOP USING WINDOWS! (you hurt my feelings)", .{});
-                            return error.Failed;
+                            var next = try reader.readByte();
+                            try env.normalizeCrlf(next, writer);
+                            switch (next) {
+                                '\n' => try writer.writeByte('\n'),
+                                else => try peek_reader.putBackByte(next),
+                            }
                         },
                         ' ', '\t', '\n' => {
                             // don't change from .read_unquoted
                         },
                         else => {
-                            std.log.err("unexpected escape value \\{c}", .{next});
+                            std.log.err("unexpected escape value \\{c}", .{char});
                             return error.Failed;
                         },
                     }
@@ -301,17 +354,11 @@ pub const Env = struct {
                     try writer.writeByte(char);
                     switch (char) {
                         '\'' => {
-                            // TODO don't read ending quote (just store state)
-                            try str_buf.append(env.allocator, char);
+                            if (env.debug) try val_buf.append(env.allocator, char);
                             state = .read_unquoted;
                         },
-                        //'\\' => {
-                        //    // TODO for the purpose of a value, we may not want to do this...
-                        //    // because std.log.info() will interpret it
-                        //    //try str_buf.append(env.allocator, char);
-                        //},
                         else => {
-                            try str_buf.append(env.allocator, char);
+                            try val_buf.append(env.allocator, char);
                         },
                     }
                 },
@@ -320,48 +367,43 @@ pub const Env = struct {
                     try writer.writeByte(char);
                     switch (char) {
                         '\\' => {
+                            if (env.debug) try val_buf.append(env.allocator, char);
                             try writer.writeByte(char);
                             state = .read_quoted_escape;
                         },
                         '"' => {
-                            // TODO don't store quote, but mark as literal
-                            try str_buf.append(env.allocator, char);
+                            if (env.debug) try val_buf.append(env.allocator, char);
                             state = .read_unquoted;
                         },
                         '$' => {
                             // TODO read { and track
-                            try str_buf.append(env.allocator, char);
+                            try val_buf.append(env.allocator, char);
                             state = .read_variable;
                         },
                         else => {
-                            try str_buf.append(env.allocator, char);
+                            try val_buf.append(env.allocator, char);
                         },
                     }
                 },
                 .read_quoted_escape => {
                     // TODO escape the next thing (space, newline, etc)
                     // (or just don't allow unquoted escapes)
-                    var next = try reader.readByte();
-                    try str_buf.append(env.allocator, next);
-                    switch (next) {
-                        '"' => {
-                            // don't change to .read_unquoted
-                        },
-                        '\\' => {
-                            // TODO don't keep extra \ in value (debug only)
-                            //try str_buf.append(env.allocator, next);
+                    var char = try reader.readByte();
 
-                            // don't change behavior
-                        },
-                        '$' => {
-                            //try str_buf.append(env.allocator, next);
-                            // don't change behavior
-                        },
+                    switch (char) {
+                        // do read \
+                        '\\' => {},
+                        // don't switch to .read_unquoted
+                        '"' => {},
+                        // don't switch to .read_variable
+                        '$' => {},
                         else => {
-                            std.log.err("unexpected escape value \\{c}", .{next});
+                            std.log.err("unexpected escape value \\{c}", .{char});
                             return error.Failed;
                         },
                     }
+
+                    try val_buf.append(env.allocator, char);
                     state = .read_quoted;
                 },
                 .read_variable => {
@@ -383,6 +425,9 @@ pub const Env = struct {
                             state = .chomp_prefix;
                         },
                         '\n' => {
+                            if (env.newline_style == null) {
+                                env.newline_style = .newline;
+                            }
                             try writer.writeByte(char);
                             state = .chomp_prefix;
                         },
@@ -407,6 +452,29 @@ pub const Env = struct {
         }
         std.log.err("that's all that's implemented right now", .{});
         return error.Failed;
+    }
+
+    inline fn normalizeCrlf(env: *Env, next: u8, writer: anytype) !void {
+        var next_is_newline = switch (next) {
+            '\n' => true,
+            else => false,
+        };
+
+        if (env.newline_style == null) {
+            env.newline_style = if (next_is_newline) .crlf else .newline;
+        }
+
+        if (env.newline_style) |newlines| {
+            switch (newlines) {
+                .crlf => try writer.writeByte('\r'),
+                else => {},
+            }
+            // fix bad 'crlf's
+            // treat stray '\r's as newlines
+            if (!next_is_newline) {
+                try writer.writeByte('\n');
+            }
+        }
     }
 
     inline fn consumeComment(char: u8, reader: anytype, writer: anytype) !void {
