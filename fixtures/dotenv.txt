@@ -1,0 +1,23 @@
+#
+# Good
+#
+
+export FOO= # ignore me
+
+SECRET=foo''bar\ baz
+
+SECRET2='foo\ bar'
+
+# "foo\\ bar" (in case the formatter eats it)
+SECRET3="foo\\ bar"
+
+SECRET4="foo\\ bar$BAZ${QUX}"
+
+
+#
+# Errors
+#
+
+NO_EQUALS
+SECRET4="foo\ bar"
+99_RED_BALLOONS=
