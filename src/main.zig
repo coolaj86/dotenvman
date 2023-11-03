@@ -5,7 +5,9 @@ const builtin = @import("builtin");
 const String = std.ArrayListUnmanaged(u8);
 const HashMap = std.StringHashMapUnmanaged([]const u8);
 const ErrorMessages = struct {
-    const all_caps = "ENVs must begin with 'export ' or ALL_CAPS, not e{s}";
+    const all_caps = "ENVs must begin with 'export' or 'ALL_CAPS=', not '{s}'";
+    const export_space = "expected whitespace after 'export' but got '{c}'";
+    const duplicate_key = "duplicated key '{s}='";
 };
 
 pub fn main() !u8 {
@@ -79,21 +81,27 @@ pub fn main() !u8 {
     ){ .unbuffered_reader = file.reader() };
     const reader = buffered_reader.reader();
 
+    // TODO open a file or stdout when in write mode
+    var buffered_writer = std.io.BufferedWriter(
+        4096,
+        @TypeOf(std.io.null_writer),
+    ){ .unbuffered_writer = std.io.null_writer };
+    const writer = buffered_writer.writer();
+
     var env = Env{ .allocator = allocator };
     defer env.deinit();
-    _ = try env.parse(reader);
+    _ = try env.parse(reader, writer);
 
     return 0;
 }
 
 pub const Env = struct {
     pub const State = enum {
-        start,
-        value,
-        variable,
-        single_quote,
-        double_quote,
-        escape,
+        chomp_prefix,
+        read_key,
+        chomp_export,
+        chomp_whitespace,
+        read_unquoted,
     };
 
     allocator: std.mem.Allocator,
@@ -104,174 +112,157 @@ pub const Env = struct {
     }
 
     /// caller should provide arena and deinit after use
-    pub fn parse(env: *Env, reader: anytype) !void {
-        var state: State = .start;
+    pub fn parse(env: *Env, src_reader: anytype, writer: anytype) !void {
+        //var had_cr = true; // preserve windows whitespace
+        var state: State = .chomp_prefix;
+        //var prev: State = .read_key;
 
-        var name_buf = String{};
-        defer name_buf.deinit(env.allocator);
+        var str_buf = String{};
+        defer str_buf.deinit(env.allocator);
 
-        var value_buf = String{};
-        defer value_buf.deinit(env.allocator);
+        // var buffered_reader = std.io.BufferedReader(
+        //     4096,
+        //     @TypeOf(file.reader()),
+        // ){ .unbuffered_reader = file.reader() };
+        // const reader = buffered_reader.reader();
+
+        const lookahead = 10;
+        var peek_reader = std.io.PeekStream(
+            .{ .Static = lookahead },
+            @TypeOf(src_reader),
+        ).init(src_reader);
+        const reader = peek_reader.reader();
 
         // '#' ignore all until end of line
         // 'export ' ignore
         // 'UPPER_SNAKES'
         state_loop: while (true) {
             // we only handle UTF-8 - because we're sane
-            const char = try reader.readByte();
             switch (state) {
-                .start => {
+                .chomp_prefix => {
+                    var char = try reader.readByte();
                     switch (char) {
-                        ' ', '\r', '\n', '\t' => {},
+                        ' ', '\t' => {
+                            // chomp chomp chomp!
+                            // (no leading or trailing spaces)
+                        },
+                        '\r', '\n' => {
+                            try writer.writeByte(char);
+                        },
                         '#' => {
+                            try writer.writeByte(char);
                             while (true) {
-                                const next = try reader.readByte();
+                                var next = try reader.readByte();
                                 switch (next) {
-                                    '\r', '\n' => break,
-                                    else => {},
-                                }
-                            }
-                        },
-                        'e' => {
-                            const chars = try reader.readBytesNoEof(6);
-                            // e'xport '
-                            if (!std.mem.eql(u8, "xport ", &chars)) {
-                                std.log.err(ErrorMessages.all_caps, .{chars});
-                                return error.Failed;
-                            }
-                        },
-                        else => {
-                            name_buf.items.len = 0;
-                            try name_buf.append(env.allocator, char);
-                            while (true) {
-                                const next = try reader.readByte();
-                                switch (next) {
-                                    'A'...'Z' => {
-                                        try name_buf.append(env.allocator, next);
-                                    },
-                                    '=' => {
-                                        state = .value;
-                                        try env.consumeValue(reader, &value_buf);
-                                        std.log.info("{s}={s}", .{ name_buf.items, value_buf.items });
-                                        // TODO put into map
-                                        value_buf.items.len = 0;
+                                    '\r', '\n' => {
+                                        try writer.writeByte(char);
                                         break;
                                     },
                                     else => {
-                                        std.log.err(ErrorMessages.all_caps, .{"TODO"});
-                                        return error.Failed;
+                                        try writer.writeByte(char);
                                     },
                                 }
                             }
-
-                            std.log.info("{s}", .{name_buf.items});
-
-                            // TODO do the rest of the stuff
-
-                            break :state_loop;
+                        },
+                        else => {
+                            try peek_reader.putBackByte(char);
+                            state = .read_key;
                         },
                     }
                 },
-                else => {
+                .read_key => {
+                    var char = try reader.readByte();
+                    switch (char) {
+                        'e' => {
+                            try peek_reader.putBackByte(char);
+                            try mustConsumeExport(reader, writer);
+
+                            const next = try mustConsumeSpaces(reader);
+                            try peek_reader.putBackByte(next);
+                            try writer.writeByte(' ');
+                        },
+                        'A'...'Z' => {
+                            try str_buf.append(env.allocator, char);
+                            try writer.writeByte(char);
+                        },
+                        '=' => {
+                            const key = str_buf.items;
+                            if (env.map.contains(key)) {
+                                std.log.err(ErrorMessages.duplicate_key, .{key});
+                                return error.Failed;
+                            }
+                            std.log.info("{s}=", .{key});
+
+                            try writer.writeByte(char);
+                            state = .read_unquoted;
+                        },
+                        else => {
+                            // TODO
+                            // https://ziglang.org/documentation/master/std/#A;std:zig.fmtEscapes
+                            switch (char) {
+                                '\r' => {
+                                    try str_buf.append(env.allocator, '\\');
+                                    try str_buf.append(env.allocator, 'r');
+                                },
+                                '\n' => {
+                                    try str_buf.append(env.allocator, '\\');
+                                    try str_buf.append(env.allocator, 'n');
+                                },
+                                else => {
+                                    try str_buf.append(env.allocator, char);
+                                },
+                            }
+                            std.log.err(ErrorMessages.all_caps, .{str_buf.items});
+                            return error.Failed;
+                        },
+                    }
+                },
+                .read_unquoted => {
+                    std.log.err("that's all that's implemented right now", .{});
                     return error.Failed;
+                },
+                else => {
+                    break :state_loop;
+                },
+            }
+        }
+    }
+
+    inline fn mustConsumeExport(reader: anytype, writer: anytype) !void {
+        const chars = try reader.readBytesNoEof(6);
+        if (!std.mem.eql(u8, "export", &chars)) {
+            std.log.err(ErrorMessages.all_caps, .{chars});
+            return error.Failed;
+        }
+        try writer.writeAll(&chars);
+    }
+
+    inline fn mustConsumeSpaces(reader: anytype) !u8 {
+        var has_space = false;
+        while (true) {
+            var next = try reader.readByte();
+            switch (next) {
+                ' ', '\t' => {
+                    has_space = true;
+                },
+                else => {
+                    if (!has_space) {
+                        std.log.err(ErrorMessages.export_space, .{next});
+                        return error.Failed;
+                    }
+                    return next;
                 },
             }
         }
     }
 
     inline fn consumeValue(env: *Env, reader: anytype, value_buf: *String) !void {
-        const first = try reader.readByte();
-        switch (first) {
-            ' ', '\t' => {
-                const next = try reader.readByte();
-                switch (next) {
-                    '\r', '\n' => {
-                        return;
-                    },
-                    else => {
-                        // TODO be more specific
-                        return error.Failed;
-                    },
-                }
-            },
-            '\r', '\n' => {
-                return;
-            },
-            '\'' => {
-                while (true) {
-                    // EOF is a true error if we hit it during a quoted value
-                    const next = try reader.readByte();
-                    if ('\'' == next) {
-                        // TODO unless a quote starts, it must be end-of-line or error
-                        break;
-                    }
-                    try value_buf.append(env.allocator, next);
-                }
-            },
-            '"' => {
-                // TODO quoted-expression rules
-                while (true) {
-                    // EOF is a true error if we hit it during a quoted value
-                    const next = try reader.readByte();
-                    if ('"' == next) {
-                        // TODO unless a quote starts, it must be end-of-line or error
-                        break;
-                    }
-                    try value_buf.append(env.allocator, next);
-                }
-            },
-            else => {
-                // TODO whitespace-ends-expression rules
-                try value_buf.append(env.allocator, first);
-                while (true) {
-                    // EOF is a true error if we hit it during a quoted value
-                    const next = reader.readByte() catch |err| {
-                        switch (err) {
-                            error.EndOfStream => {
-                                return;
-                            },
-                            else => {
-                                //return error.Failed;
-                                return err;
-                            },
-                        }
-                    };
-                    //if ('\r' == next || '\n' == next) {
-                    switch (next) {
-                        '\r', '\n' => {
-                            return;
-                        },
-                        ' ', '\t' => {
-                            while (true) {
-                                const last = reader.readByte() catch |err| {
-                                    switch (err) {
-                                        error.EndOfStream => {
-                                            return;
-                                        },
-                                        else => {
-                                            return err;
-                                            //return error.Failed;
-                                        },
-                                    }
-                                };
-                                switch (last) {
-                                    ' ', '\t' => {},
-                                    '\r', '\n' => {
-                                        return;
-                                    },
-                                    else => {
-                                        return error.Failed;
-                                    },
-                                }
-                            }
-                        },
-                        else => {
-                            try value_buf.append(env.allocator, next);
-                        },
-                    }
-                }
-            },
-        }
+        _ = env;
+        _ = reader;
+        _ = value_buf;
+        // const first = try reader.readByte();
+        // switch (first) {
+        // }
     }
 };
 
