@@ -292,7 +292,9 @@ pub const Env = struct {
                         ' ', '\t' => {
                             // continuation of the output string 'MY_KEY='
                             std.debug.print("[{s}]{s}\n", .{ key_buf.items, val_buf.items });
-                            try env.map.put(env.allocator, key_buf.items, val_buf.items);
+                            var key = try env.allocator.dupe(u8, key_buf.items);
+                            var val = try env.allocator.dupe(u8, val_buf.items);
+                            try env.map.put(env.allocator, key, val);
                             //std.debug.print("{'}\n", .{std.zig.fmtEscapes(val_buf.items)});
                             var_buf.items.len = 0;
                             state = .chomp_eol;
@@ -308,7 +310,9 @@ pub const Env = struct {
                             }
                             // continuation of MY_KEY=
                             std.debug.print("[{s}]{s}\n", .{ key_buf.items, val_buf.items });
-                            try env.map.put(env.allocator, key_buf.items, val_buf.items);
+                            var key = try env.allocator.dupe(u8, key_buf.items);
+                            var val = try env.allocator.dupe(u8, val_buf.items);
+                            try env.map.put(env.allocator, key, val);
                             //std.debug.print("{'}\n", .{std.zig.fmtEscapes(val_buf.items)});
                             try writer.writeByte(char);
                             state = .chomp_prefix;
