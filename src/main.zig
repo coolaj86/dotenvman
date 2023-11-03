@@ -195,6 +195,8 @@ pub const Env = struct {
                         },
                         else => {
                             try peek_reader.putBackByte(char);
+
+                            key_buf.items.len = 0;
                             state = .read_key;
                         },
                     }
@@ -235,9 +237,8 @@ pub const Env = struct {
                             try writer.writeByte(char);
                             // TODO dupe keyname somewhere
 
-                            key_buf.items.len = 0;
+                            //key_buf.items.len = 0;
                             val_buf.items.len = 0;
-                            var_buf.items.len = 0;
 
                             var next = try reader.readByte();
                             switch (next) {
@@ -290,9 +291,9 @@ pub const Env = struct {
                         },
                         ' ', '\t' => {
                             // continuation of the output string 'MY_KEY='
-                            std.debug.print("{s}\n", .{val_buf.items});
+                            std.debug.print("[{s}]{s}\n", .{ key_buf.items, val_buf.items });
+                            try env.map.put(env.allocator, key_buf.items, val_buf.items);
                             //std.debug.print("{'}\n", .{std.zig.fmtEscapes(val_buf.items)});
-                            val_buf.items.len = 0;
                             var_buf.items.len = 0;
                             state = .chomp_eol;
                         },
@@ -305,11 +306,10 @@ pub const Env = struct {
                             if (env.newline_style == null) {
                                 env.newline_style = .newline;
                             }
-                            // TODO read for \n after \r
                             // continuation of MY_KEY=
-                            std.debug.print("{s}\n", .{val_buf.items});
+                            std.debug.print("[{s}]{s}\n", .{ key_buf.items, val_buf.items });
+                            try env.map.put(env.allocator, key_buf.items, val_buf.items);
                             //std.debug.print("{'}\n", .{std.zig.fmtEscapes(val_buf.items)});
-                            val_buf.items.len = 0;
                             try writer.writeByte(char);
                             state = .chomp_prefix;
                         },
@@ -416,9 +416,12 @@ pub const Env = struct {
                                 try val_buf.append(env.allocator, '=');
                             }
 
+                            std.log.info("searching for {s}", .{var_buf.items});
                             if (env.map.get(var_buf.items)) |val| {
+                                std.log.info("found local {s}", .{val});
                                 try val_buf.appendSlice(env.allocator, val);
                             } else if (envMap.get(var_buf.items)) |val| {
+                                std.log.info("found os {s}", .{val});
                                 try val_buf.appendSlice(env.allocator, val);
                             } else {
                                 std.log.err("[warn] accessed undefined ENV '${s}'", .{var_buf.items});
