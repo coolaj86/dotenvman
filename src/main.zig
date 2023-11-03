@@ -104,8 +104,10 @@ pub const Env = struct {
         read_key,
         chomp_export,
         read_unquoted,
+        read_unquoted_escape,
         read_literal,
         read_quoted,
+        read_quoted_escape,
         read_variable,
         chomp_eol,
     };
@@ -227,35 +229,7 @@ pub const Env = struct {
                     switch (char) {
                         '\\' => {
                             try writer.writeByte(char);
-                            // TODO escape the next thing (space, newline, etc)
-                            // (or just don't allow unquoted escapes)
-                            var next = try reader.readByte();
-                            try writer.writeByte(next);
-                            try str_buf.append(env.allocator, next);
-                            switch (next) {
-                                '\'' => {
-                                    // don't change to .read_literal
-                                },
-                                '"' => {
-                                    // don't change to .read_quoted
-                                },
-                                '\\' => {
-                                    //try str_buf.append(env.allocator, next);
-                                    // don't change behavior
-                                },
-                                '\r' => {
-                                    // TODO check if the next char is `\n` and treat as a unit
-                                    std.log.err("NO \\r! STOP USING WINDOWS! (you hurt my feelings)", .{});
-                                    return error.Failed;
-                                },
-                                ' ', '\t', '\n' => {
-                                    // don't change from .read_unquoted
-                                },
-                                else => {
-                                    std.log.err("unexpected escape value \\{c}", .{next});
-                                    return error.Failed;
-                                },
-                            }
+                            state = .read_unquoted_escape;
                         },
                         '\'' => {
                             // TODO don't store quote, but mark as literal
@@ -290,6 +264,38 @@ pub const Env = struct {
                         },
                     }
                 },
+                .read_unquoted_escape => {
+                    // TODO escape the next thing (space, newline, etc)
+                    // (or just don't allow unquoted escapes)
+                    var next = try reader.readByte();
+                    try writer.writeByte(next);
+                    try str_buf.append(env.allocator, next);
+                    switch (next) {
+                        '\'' => {
+                            // don't change to .read_literal
+                        },
+                        '"' => {
+                            // don't change to .read_quoted
+                        },
+                        '\\' => {
+                            //try str_buf.append(env.allocator, next);
+                            // don't change behavior
+                        },
+                        '\r' => {
+                            // TODO check if the next char is `\n` and treat as a unit
+                            std.log.err("NO \\r! STOP USING WINDOWS! (you hurt my feelings)", .{});
+                            return error.Failed;
+                        },
+                        ' ', '\t', '\n' => {
+                            // don't change from .read_unquoted
+                        },
+                        else => {
+                            std.log.err("unexpected escape value \\{c}", .{next});
+                            return error.Failed;
+                        },
+                    }
+                    state = .read_unquoted;
+                },
                 .read_literal => {
                     var char = try reader.readByte();
                     try writer.writeByte(char);
@@ -315,29 +321,7 @@ pub const Env = struct {
                     switch (char) {
                         '\\' => {
                             try writer.writeByte(char);
-                            // TODO escape the next thing (space, newline, etc)
-                            // (or just don't allow unquoted escapes)
-                            var next = try reader.readByte();
-                            try str_buf.append(env.allocator, next);
-                            switch (next) {
-                                '"' => {
-                                    // don't change to .read_unquoted
-                                },
-                                '\\' => {
-                                    // TODO don't keep extra \ in value (debug only)
-                                    //try str_buf.append(env.allocator, next);
-
-                                    // don't change behavior
-                                },
-                                '$' => {
-                                    //try str_buf.append(env.allocator, next);
-                                    // don't change behavior
-                                },
-                                else => {
-                                    std.log.err("unexpected escape value \\{c}", .{next});
-                                    return error.Failed;
-                                },
-                            }
+                            state = .read_quoted_escape;
                         },
                         '"' => {
                             // TODO don't store quote, but mark as literal
@@ -353,6 +337,32 @@ pub const Env = struct {
                             try str_buf.append(env.allocator, char);
                         },
                     }
+                },
+                .read_quoted_escape => {
+                    // TODO escape the next thing (space, newline, etc)
+                    // (or just don't allow unquoted escapes)
+                    var next = try reader.readByte();
+                    try str_buf.append(env.allocator, next);
+                    switch (next) {
+                        '"' => {
+                            // don't change to .read_unquoted
+                        },
+                        '\\' => {
+                            // TODO don't keep extra \ in value (debug only)
+                            //try str_buf.append(env.allocator, next);
+
+                            // don't change behavior
+                        },
+                        '$' => {
+                            //try str_buf.append(env.allocator, next);
+                            // don't change behavior
+                        },
+                        else => {
+                            std.log.err("unexpected escape value \\{c}", .{next});
+                            return error.Failed;
+                        },
+                    }
+                    state = .read_quoted;
                 },
                 .read_variable => {
                     std.log.err("TODO: we can't read vars yet!", .{});
